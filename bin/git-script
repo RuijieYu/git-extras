@@ -1,0 +1,287 @@
+#!/usr/bin/env -S python3 -i
+'''
+    Usage:
+        git script [<short-opts>] [<long-opts>] [--] [<script-path>] [<script-args>]
+
+    Arguments:
+        -h, --help
+        -?
+            "-h", print out this help message and quit;
+            "-?" argument additionally prints to stderr with exit code 64
+
+        -b [b<cross>], --cross-boundary[=b<cross>]
+        --no-cross-boundary
+            b<cross> is a boolean argument, default to true.
+            "--no-cross-boundary" is equivalent to "--cross-boundary=false"
+
+        -c [b<check>], --check-git[=b<check>]
+        --no-check-git
+        -0, -1
+            b<check> is a boolean argument, default to true.
+            See Supplemented Arguments section.
+            "-0" and "-1" are understood to be "-c 0" and "-c 1" respectively
+            "--no-check-git" is equivalent to "--check-git=false"
+
+        -f, --force
+            Currently equivalent to -0
+
+        -v, --verbose
+            Be verbose
+
+        -q, --quiet
+            Be quiet
+
+        -V, --version
+            Print the version info and quit
+
+        --
+            Stops processing arguments and treat the remainder as script path and args
+
+    Supplemented Arguments:
+        "b<description>" denotes a boolean argument.
+        Acceptable input include:
+            all integers (nonzero = true, zero = false);
+            "true" or "false" verbatim, case-insensitive.
+
+    Note:
+        Invocations of repeated or conflicting arguments will result in
+        the invalidation of all but the last argument. For example,
+        the command "git script -011c 1 --check-git=false -c true <...>"
+        will be equivalent to "git script -c true <...>".
+'''
+
+import typing;
+import os;
+import subprocess as sp;
+from sys import argv as _argv;
+
+from pdb import set_trace as st;
+st = lambda *_, **__: None;
+
+def _convIter(
+        it: typing.Iterable[typing.Any],
+        tpe: type) -> typing.Iterable[typing.Any]:
+    return (tpe(elem) for elem in it);
+
+_ver: typing.Tuple[int, ...] = (0, 0, 1);
+_verStr: typing.Callable[[], str] = lambda: 'v' + '.'.join(_convIter(_ver, str));
+
+# each dict value is a tuple of form
+# (map: optional[str], numArgs: int_range, mappedArgs: optional[tuple])
+# The long arg maps to "map" (must be a short command) if supplied
+# numArgs of type int or any obj that implements obj.__contains__(int) -> bool
+_longArgData: dict = {
+    'help': ('h', 0),
+    'force': ('f', 0),
+    'verbose': ('v', 0),
+    'quiet': ('q', 0),
+    'version': ('V', 0),
+
+    'check-git': ('c', range(2)),
+    'no-check-git': ('c', 0, (0,)),
+
+    'cross-boundary': ('b', range(2)),
+    'no-cross-boundary': ('b', 0, (0,)),
+};
+
+def _boolParse(boolArg: typing.Union[bool, int, str]) -> typing.Optional[bool]:
+    'Parse boolean argument according to doc'
+    if isinstance(boolArg, (bool, int)):
+        return bool(boolArg);
+    lower: str = str(boolArg).lower();
+    if lower in ('false', 'true'):
+        return lower == 'true';
+
+    return _boolParse(int(lower));
+
+def parseArgs(argv: typing.Sequence[str]) -> typing.Dict[str, typing.Any]:
+    ''
+    args: typing.Dict[str, typing.Any] = {};
+    stop: bool = False;
+
+    # default values
+    args.setdefault('verbosity', 1);
+    args.setdefault('check-git', False);
+    args.setdefault('cross-boundary', False);
+
+    st();
+
+    def _shortArgs(
+            argDict: dict,
+            argChar: str,
+            argArgs: typing.Sequence[str] = ()) -> bool:
+        ''
+        # sanity check
+        try:
+            assert isinstance(argChar, str);
+            assert len(argChar) == 1;
+        except Exception:
+            return False;
+
+        # no returns
+        if argChar == 'h':
+            _help();
+        elif argChar == '?':
+            _helpQ();
+        elif argChar == 'V':
+            _version();
+
+        # remaining args
+        elif argChar == 'v':
+            argDict['verbosity'] = 2;
+        elif argChar == 'q':
+            argDict['verbosity'] = 0;
+        elif argChar in 'c01':
+            if argChar != 'c':
+                argArgs = (int(argChar),);
+            if not argArgs:
+                argArgs = (1,);
+            # now should be syntax for -c b<check>
+            argDict['check-git'] = _boolParse(argArgs[0]);
+        elif argChar == 'b':
+            if not argArgs:
+                argArgs = (1,);
+            argDict['cross-boundary'] = _boolParse(argArgs[0]);
+        elif argChar == 'f':
+            # trivial argument, currently equiv to -0
+            return _shortArgs(argDict, '0');
+        else:
+            pass
+
+        return True;
+
+    def _longArgs(
+            argDict: dict,
+            argStr: str,
+            argArgs: typing.Sequence[str] = ()) -> bool:
+        ''
+        if argStr not in _longArgData:
+            return False;
+
+        attr: tuple = _longArgData[argStr];
+        mapped: typing.Optional[str] = attr[0];
+        mappedArgs: typing.Optional[tuple] = None if len(attr) < 3 else attr[2];
+        numArgs: typing.Any = attr[1];
+
+        assert(isinstance(numArgs, int) or hasattr(numArgs, '__contains__'));
+
+        if mapped:
+            return _shortArgs(
+                argDict,
+                mapped,
+                mappedArgs
+                if mappedArgs is not None
+                else argArgs
+            );
+
+        # currently everything is mapped
+        return False;
+
+    def _argFail(key: str, args: tuple = ()) -> typing.NoReturn:
+        print(
+            'Error parsing '
+            f'{key} '
+            'with args as '
+            f'{args}'
+        );
+        exit(2);
+
+    # for (index, arg) in enumerate(argv[1:]):
+    index: int = 0;
+    while index + 1 < len(argv):
+        # next index and arg
+        index += 1;
+        arg: str = argv[index];
+
+        # check if stopped parsing
+        if stop:
+            args['script'] = argv[index];
+            args['args'] = argv[index + 1:];
+            break;
+
+        # for each grouping of args
+        # if reading '--', stop parsing
+        elif arg == '--':
+            stop = True;
+            index -= 1;
+
+        # long options, --long-option=argument
+        elif arg.startswith('--'):
+            # look for '=' as delim
+            split: typing.Sequence[str] = arg[2:].split('=');
+            kwname: str = split[0];
+            kwargs: typing.Tuple[str] = '='.join(split[1:]).split(',');
+            if not _longArgs(args, kwname, kwargs):
+                _argFail(f'--{kwname}', kwargs);
+
+        # short options, optionally look ahead if at tail of a group
+        # and next arg does not start with "-"
+        elif arg.startswith('-'):
+            for char in arg[1:-1]:
+                if not _shortArgs(args, char):
+                    _argFail(f'-{char}');
+
+            char = arg[-1];
+            # try look ahead
+            if index + 1 < len(argv) and not argv[index + 1].startswith('-'):
+                index += 1;
+                kwargs: typing.Tuple[str] = argv[index].split(',');
+            else:
+                kwargs: typing.Tuple[str] = ();
+
+            if not _shortArgs(args, char, kwargs):
+                _argFail(f'-{char}', kwargs);
+        # now arg stops
+        else:
+            stop = True;
+            index -= 1;
+
+    return args;
+
+def _version() -> typing.NoReturn:
+    'Print out version info and quit'
+    print(_verStr());
+    exit(0);
+
+def _help() -> typing.NoReturn:
+    'Print out the help doc and quit'
+    # glob = globals();
+    # modu = glob.get('__module__', None);
+    # name = glob.get(
+    #     '__qualname__', glob.get(
+    #         '__name__', '__main__'
+    #     )
+    # );
+
+    # print(
+    #     (f'{modu}.' if modu else '')
+    #     + name
+    # );
+
+    print('git script');
+
+    print(__doc__);
+    exit(0);
+
+def _helpQ() -> typing.NoReturn:
+    'Print out the help doc, but return non-zero'
+    ret = 64;
+
+    # assumes bash-like shell, share &1 -> &2
+    sp.call(f'"{_argv[0]}" -h >&2', shell=True);
+
+    # quit with specified exit code
+    exit(ret);
+
+def main() -> None:
+    'main function'
+    # _help();
+
+def debug() -> None:
+    'Debug function'
+    print(parseArgs((_argv[0],)));
+    print(parseArgs((_argv[0], '-0vq0111101',)));
+
+if __name__ == "__main__":
+    # main();
+    debug();

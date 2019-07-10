@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+
+usage() (
+    echo 'Usage:';
+    echo '      git script [<short-opts>] [<long-opts>] [<script-path>]';
+    echo;
+    echo '-h, -?, --help: print out this help message.';
+    echo '      This takes precedence over all other arguments. ';
+    echo;
+    echo '-c <bool>, --check-git=<>: '
+
+    # end help with an empty newline
+    echo;
+)
+
+args() {
+    # convert long arguments to short ones
+    # credit to https://stackoverflow.com/questions/12022592/how-can-i-use-long-options-with-the-bash-getopts-builtin
+    for arg in "$@"; do
+        shift;
+        case "$arg" in
+            # convert to short and roll to end
+            ('--help') set -- "$@" '-h'; return;;
+
+            # roll to end directly
+            (*) set -- "$@" "$arg";;
+            esac
+    done
+
+    # deal with short arguments
+    while getopts ':h?sc' arg; do
+        case "$arg" in
+            ('h') usage; exit -"$?";;
+            ('?') usage >&2 ;exit 1;;
+
+            (*) :;;
+        esac
+    done
+
+    # export arguments into separate array
+    export _args=("$@");
+}
+
+main() {
+:;
+}
+
+args "$@";
+echo "args=: ${_args[@]}";
+# env;
